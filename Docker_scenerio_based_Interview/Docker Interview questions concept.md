@@ -523,3 +523,358 @@ docker run -v sbi-reports:/app/reports my-image
 ```
 
 Reports are now stored in the `sbi-reports` Docker volume and persist even if the container is stopped or removed.
+
+---
+
+### 18. When you run a new container with the same volume, will the `transactions.log` file still exist?
+
+```bash
+docker run -v my-volume:/app/data my-image
+```
+
+**Bonus:** What if I use a bind mount instead (`-v /host/path:/app/data`) — will the file persist after the container is deleted?
+
+**Yes, absolutely.** The `transactions.log` file will still exist in both cases — whether using a Docker volume (`my-volume`) or a bind mount (`/host/path`).
+
+Volumes and bind mounts are **external storage** that exists outside the container's ephemeral filesystem. When the container is deleted, the container's writable layer is destroyed, but the volume or bind mount remains untouched. The data stays on the host disk.
+
+When a new container is started with the same volume or bind mount, it mounts that same existing storage and the `transactions.log` file is right there. This is exactly how state is maintained for stateful applications like databases or, in SBI's case, report generation and log aggregation services.
+
+---
+
+### 19. The SBI cloud team notices high ECR storage costs due to many unused volumes on EKS worker nodes. How do you clean them up?
+
+`docker volume prune` removes all volumes not referenced by any running container. Add the `-f` flag to skip the confirmation prompt in CI/CD scripts:
+
+```bash
+docker volume prune -f
+```
+
+> **Caution for SBI's banking environment:** Some volumes might contain critical data even if no container is currently using them (e.g., a database temporarily stopped). Always list volumes with `docker volume ls` and review them before pruning. In production, prefer a lifecycle policy in Terraform or EBS snapshots over manual prune commands.
+
+---
+
+### 20. What does the `VOLUME` instruction in a Dockerfile actually do? What is the downside for sensitive audit logs?
+
+`VOLUME ["/app/logs"]` does **NOT** create a persistent, named volume automatically. Instead, Docker creates an **anonymous volume** with a randomly generated name (like `83f2d...`) and mounts it to `/app/logs`.
+
+**The downside for SBI's banking audit logs:**
+
+Since the volume is anonymous, logs are written to this unnamed volume. When the container is deleted without `docker rm -v`, that anonymous volume becomes a **dangling volume** — still on disk, but with no traceability back to a specific deployment.
+
+**Best practice for SBI:** Never use `VOLUME` in the Dockerfile for application logs. Instead, let the app write to `/app/logs` inside the container filesystem and **explicitly mount a named volume at runtime**:
+
+```bash
+docker run -v my-audit-logs:/app/logs my-image
+```
+
+This ensures the storage location is predictable and traceable — crucial for banking compliance.
+
+---
+
+## Docker Networking
+
+---
+
+### 21. Docker Networking — The Three Main Network Drivers
+
+| Driver | Description |
+|---|---|
+| **`bridge`** (default) | Docker creates this automatically. Containers without a specified network attach here. |
+| **`host`** | Container uses the host machine's network stack directly — no isolation. Port `8080` in the container is directly exposed on the host's IP without any `-p` mapping. |
+| **`overlay`** | Connects containers across multiple Docker hosts (Swarm or Kubernetes). Not needed for single-host setups. |
+
+**The default bridge trap:** Containers on the default bridge network can only communicate by **IP address**, not by container name. To enable DNS-based name resolution between containers, create a **user-defined bridge network**.
+
+**Port mapping rule (`-p 8080:8080`):**
+- Left side (`8080`) → host port (your laptop/VM)
+- Right side (`8080`) → container port
+
+**The Spring Boot binding trap:** If your app listens on `127.0.0.1` inside the container, it will never accept traffic from the host even with `-p 8080:8080`. Your app **must** bind to `0.0.0.0` (all interfaces). In Spring Boot: `server.address=0.0.0.0` in `application.properties`.
+
+---
+
+### 22. You run a container with `-p 8080:8080` but `http://localhost:8080` fails. Why?
+
+```bash
+docker run -d -p 8080:8080 --name my-app my-image
+```
+
+The three common Docker network drivers are **bridge**, **host**, and **overlay**. The default is **bridge**.
+
+**Two likely causes of failure:**
+
+1. The Spring Boot app is bound to `127.0.0.1` instead of `0.0.0.0` inside the container. Fix: set `server.address=0.0.0.0` in `application.properties`.
+
+2. On Docker Desktop (Windows/Mac), Docker runs inside a VM. Verify the port mapping is actually registered:
+
+```bash
+docker port my-app
+```
+
+---
+
+### 23. Connect `sbi-database` and `sbi-backend` on a custom network so they can communicate by hostname.
+
+```bash
+# 1. Create the custom bridge network
+docker network create sbi-network
+
+# 2. Run the PostgreSQL database
+docker run -d --name sbi-database --network sbi-network postgres
+
+# 3. Run the Spring Boot backend on the same network
+docker run -d --name sbi-backend --network sbi-network my-spring-app
+```
+
+Because this is a **user-defined bridge network**, the backend container automatically resolves the hostname `sbi-database` to the database container's IP — Docker's internal DNS handles this.
+
+---
+
+### 24. What is the difference between `-p` and `EXPOSE`? Which one is actually required to talk to the container from your laptop?
+
+| | `EXPOSE` | `-p` |
+|---|---|---|
+| **What it does** | Documentation/metadata — tells developers which port the container listens on | Creates the actual port binding between host and container |
+| **Opens port to host?** | ❌ No | ✅ Yes |
+| **Required for external access?** | ❌ No | ✅ Yes |
+
+- `EXPOSE 8080` does **not** open the port to the host. It also enables the `-P` flag (capital P), which publishes all exposed ports to random host ports.
+- `-p 8080:8080` creates the actual port binding. Without it, no traffic from your laptop can reach the container regardless of `EXPOSE`.
+
+> **Analogy:** `EXPOSE` is like labeling a door with a room number. `-p` is like actually cutting a hole in the wall so people can walk through. Without `-p`, the label is useless for external access.
+
+---
+
+### 25. You accidentally created 500 unused networks via CI/CD automation. How do you clean them up?
+
+```bash
+docker network prune -f
+```
+
+The `-f` flag skips the confirmation prompt — useful for CI/CD scripts.
+
+**What it removes:** All custom user-defined networks not currently used by any running container.  
+**What it preserves:** The default `bridge`, `host`, and `none` networks — they are built-in and protected.
+
+> For SBI's production environment, first review unused networks with `docker network ls` before pruning. In CI/CD, schedule this clean-up during off-peak hours.
+
+---
+
+## Docker Compose
+
+---
+
+### 26. What is Docker Compose? Write a `docker-compose.yml` for a Spring Boot backend and PostgreSQL database.
+
+Docker Compose is a tool for defining and running multi-container Docker applications. It allows spinning up an entire stack with a single `docker-compose up` command.
+
+```yaml
+version: '3.8'
+
+services:
+  database:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: sbi_bank
+    ports:
+      - "5432:5432"           # Optional: to access DB from host
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # Persist data
+    networks:
+      - sbi-network
+
+  backend:
+    build: .                  # Builds from Dockerfile in current directory
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://database:5432/sbi_bank
+      SPRING_DATASOURCE_USERNAME: admin
+      SPRING_DATASOURCE_PASSWORD: secret
+    depends_on:
+      - database              # Waits for DB to start (but not fully ready)
+    networks:
+      - sbi-network
+
+networks:
+  sbi-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+```
+
+**Key points:**
+
+- **Networking** — No need to manually create the network. Compose creates `sbi-network` automatically and attaches both containers.
+- **DNS Resolution** — On a user-defined network, Compose provides automatic DNS. The backend reaches the database using the service name `database` as the hostname — no IP addresses needed.
+- **Data Persistence** — The `postgres_data` volume persists database data across container restarts.
+
+> `depends_on` only waits for the database **container to start**, not for PostgreSQL to be **fully ready**. For production, add a health check or a wait script in the entrypoint.
+
+---
+
+### 27. How do you rebuild and restart just the backend service without restarting the database?
+
+```bash
+docker compose up -d --build backend
+```
+
+> `--force-recreate` only recreates the container even if configuration hasn't changed — if you changed Java code and rebuilt the JAR, the Docker image hasn't been rebuilt, so `--force-recreate` restarts the container with the **old JAR**. Use `--build` to rebuild the image first.
+
+---
+
+### 28. How do you override `docker-compose.yml` for production-like testing without modifying the original file?
+
+Docker Compose supports multiple compose files via the `-f` flag:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up
+```
+
+The second file overrides the first. In `docker-compose.prod.yml`, change the build context to use `Dockerfile.prod` and update the volume mounts.
+
+Alternatively, Compose automatically looks for a file named `docker-compose.override.yml` and applies it on top of the base file — no `-f` flag needed. This is ideal for separating local dev from production-specific changes.
+
+---
+
+### 30. How do you securely pass the PostgreSQL password to Compose without hardcoding it in the YAML file?
+
+**Option 1 — `.env` file (standard & recommended for local dev):**
+
+Create a `.env` file in the same directory as `docker-compose.yml`:
+```
+POSTGRES_PASSWORD=mySup3rSecr3t
+```
+
+Reference it in the compose file:
+```yaml
+environment:
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+```
+
+Add `.env` to `.gitignore` so it never gets committed to GitHub.
+
+**Option 2 — Host environment variables:**
+
+```bash
+export POSTGRES_PASSWORD=mySup3rSecr3t
+```
+
+Compose automatically picks it up.
+
+**Option 3 — Secrets management (production):**
+
+For a banking production environment, use **AWS Secrets Manager** or **Kubernetes Secrets** and inject them at runtime via ECS or EKS. The `.env` file is only acceptable for local Compose testing.
+
+---
+
+## Scenario-Based Troubleshooting
+
+---
+
+### 32. Your Spring Boot container on EKS crashes randomly with no useful logs. The host has 8GB RAM. What is killing the container?
+
+The Linux kernel mechanism is the **OOM Killer (Out-Of-Memory Killer)**. When the host runs out of memory, the kernel kills processes consuming excessive memory to protect the system from crashing.
+
+**Fix without changing application code:**
+
+Set a hard memory limit:
+```bash
+docker run -m 1g my-image
+```
+
+Set a soft memory reservation:
+```bash
+docker run -m 2g --memory-reservation 1.5g my-image
+```
+
+Disable OOM Killer for the container (use with extreme caution):
+```bash
+docker run --oom-kill-disable -m 2g my-image
+```
+
+> Avoid `--oom-kill-disable` in production — it can crash the entire node.
+
+**For Spring Boot specifically:** Set JVM heap limits so the JVM doesn't request more memory than the container allows:
+```dockerfile
+ENV JAVA_OPTS="-Xmx512m"
+```
+The JVM heap + container overhead must stay below the container's memory limit.
+
+---
+
+### 33. You SSH into an EC2 instance and run `docker ps`. You get: `Cannot connect to the Docker daemon at unix:///var/run/docker.sock`
+
+**Three common causes:**
+
+**1. Docker daemon is not running:**
+```bash
+systemctl status docker
+systemctl start docker
+```
+
+**2. Permission issue — your Linux user is not in the `docker` group:**
+
+The socket `/var/run/docker.sock` is owned by `root:docker`. If your user isn't in the group, you get permission denied.
+```bash
+sudo usermod -aG docker $USER
+# Then log out and back in, or run:
+newgrp docker
+```
+
+**3. Docker socket file is missing or corrupted:**
+
+This can happen if the daemon crashed unexpectedly. Restarting the daemon recreates the socket file.
+
+> **Quick diagnosis:** Run `sudo docker ps`. If it works with `sudo`, it's a permissions problem, not a daemon issue.
+
+---
+
+### 34. Your Spring Boot container starts and immediately exits with no error logs in `docker logs`. What do you do?
+
+**Debugging checklist:**
+
+1. **Check the entrypoint form** — Shell form (`ENTRYPOINT java -jar app.jar`) can cause the container to exit because the shell intercepts signals incorrectly. Use the exec form:
+   ```dockerfile
+   ENTRYPOINT ["java", "-jar", "app.jar"]
+   ```
+
+2. **Run the container interactively** to see the exact error:
+   ```bash
+   docker run -it my-image /bin/sh
+   ```
+   Then manually run `java -jar app.jar` inside the shell.
+
+3. **Check for a missing JAR** — The JAR might not be in the `WORKDIR`. Inspect the container's filesystem to confirm the file path.
+
+4. **Check for a background process** — If the main process detaches and runs in the background, the container exits because there is no foreground process. Spring Boot runs in the foreground by default, but a misconfigured startup script could cause this.
+
+---
+
+### 35. You pull an image from ECR on another EC2 instance and get: `denied: User not authorized to perform sts:AssumeRole`
+
+This error means the AWS credentials on the EC2 instance do not have permission to assume the IAM role required to pull from ECR.
+
+**Step-by-step fix:**
+
+1. Authenticate Docker with AWS ECR:
+   ```bash
+   aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
+   ```
+
+2. Check the IAM role attached to the EC2 instance. It needs the `AmazonEC2ContainerRegistryReadOnly` policy or a custom policy with:
+   - `ecr:GetDownloadUrlForLayer`
+   - `ecr:BatchGetImage`
+   - `ecr:GetAuthorizationToken`
+
+3. Verify which IAM identity is in use:
+   ```bash
+   aws sts get-caller-identity
+   ```
+
+4. **For EKS:** Use **IAM Roles for Service Accounts (IRSA)** to grant the pod permission to pull the image, rather than relying on the EC2 instance role.
+
