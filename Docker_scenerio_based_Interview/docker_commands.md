@@ -51,7 +51,17 @@ docker inspect -f '{{.State.Status}}' CONTAINER - extract one field with a forma
 docker inspect -f '{{.State.Status}}' web
 docker inspect -f '{{.State.ExitCode}}' web
 docker inspect -f '{{.State.Running}}' web
+docker run --restart POLICY ... - set a restart policy (no, on-failure, always, unless-stopped)
+There are four policies:
 
+no - the default. Docker never restarts the container. When it exits, it stays exited.
+on-failure - restart only if the process exits with a non-zero code. A clean exit (code 0) is left alone. You can cap the attempts with on-failure:5.
+always - restart whenever it stops, for any reason, and also start it again when the Docker daemon itself restarts.
+unless-stopped - like always, but if you deliberately docker stop it, Docker does not bring it back until you start it yourself.
+
+docker run -p HOST:CONTAINER ... - publish a container port to a host port
+
+docker run -d -P --name web nginx
 
 
 
