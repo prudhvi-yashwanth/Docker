@@ -32,3 +32,29 @@ docker exec -it CONTAINER sh - open a shell in a running container
 
 docker exec exec-lab sh -c 'echo "exec reached the container" > /tmp/deploy-check.txt'
 docker exec exec-lab cat /tmp/deploy-check.txt
+
+
+docker logs CONTAINER - show a container's output
+docker logs -f CONTAINER - follow the log stream live
+docker logs --tail N CONTAINER - show only the last N lines
+docker logs --since TIME CONTAINER - show only recent lines
+
+docker cp CONTAINER:/path ./local - copy a file out of a container
+docker cp ./local CONTAINER:/path - copy a file into a container
+
+docker pause CONTAINER / docker unpause CONTAINER - freeze and resume a container
+When you run docker pause, the memory contents are fully preserved (retained), and the container’s network state—including the Forwarding Database (FDB) entries and VXLAN configurations—remains intact and is not lost
+
+
+docker inspect CONTAINER - full container details as JSON
+docker inspect -f '{{.State.Status}}' CONTAINER - extract one field with a format template
+docker inspect -f '{{.State.Status}}' web
+docker inspect -f '{{.State.ExitCode}}' web
+docker inspect -f '{{.State.Running}}' web
+
+
+
+
+
+
+
