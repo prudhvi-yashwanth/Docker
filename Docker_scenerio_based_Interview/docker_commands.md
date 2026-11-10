@@ -62,6 +62,18 @@ unless-stopped - like always, but if you deliberately docker stop it, Docker doe
 docker run -p HOST:CONTAINER ... - publish a container port to a host port
 
 docker run -d -P --name web nginx
+docker run --env-file FILE ... 
+docker run -d --env-file db.env --name db postgres:16
+docker run -e KEY=value ... - set an environment variable in the container
+docker run -e KEY ... - pass a variable through from your shell
+export API_TOKEN=abc123
+docker run -e API_TOKEN --name app alpine env
+
+docker exec webconf printenv APP_ENV LOG_LEVEL MAX_CONNECTIONS
+ead them back from inside a running container with printenv.
+
+docker run --env-file FILE ... - load environment variables from a file
+
 
 
 
